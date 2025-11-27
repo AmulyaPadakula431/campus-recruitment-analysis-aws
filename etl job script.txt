@@ -1,0 +1,150 @@
+# -----------------------------------------------------------
+# 1. IMPORTS
+# -----------------------------------------------------------
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
+from pyspark.sql.functions import col, trim, upper, to_date
+ 
+# -----------------------------------------------------------
+# 2. SPARK SESSION
+# -----------------------------------------------------------
+spark = SparkSession.builder.appName("CampusRecruitmentETL").getOrCreate()
+ 
+# -----------------------------------------------------------
+# 3. BUCKET PATHS
+# -----------------------------------------------------------
+bucket = "athena-raw431"
+raw_path = f"s3://{bucket}/raw-folder/"
+processed = f"s3://{bucket}/processed/"
+ 
+# -----------------------------------------------------------
+# 4. DEFINE SCHEMAS
+# -----------------------------------------------------------
+ 
+company_schema = StructType([
+    StructField("Date", StringType(), True),
+    StructField("College_Name", StringType(), True),
+    StructField("Company_Name", StringType(), True),
+    StructField("Head_Office_Location", StringType(), True),
+    StructField("Package", DoubleType(), True),
+    StructField("Student_Selected", IntegerType(), True),
+    StructField("Student_Participated", IntegerType(), True),
+    StructField("Criteria", IntegerType(), True)
+])
+ 
+college_schema = StructType([
+    StructField("Date", StringType(), True),
+    StructField("College", StringType(), True),
+    StructField("Location", StringType(), True),
+    StructField("NO_OF_STUDENTS_INDIAN", IntegerType(), True),
+    StructField("NO_OF_STUDENTS_FOREIGN", IntegerType(), True),
+    StructField("FEES", DoubleType(), True),
+    StructField("SURVEY_Name", StringType(), True),
+    StructField("RANK", IntegerType(), True)
+])
+ 
+date_schema = StructType([
+    StructField("date_key", IntegerType(), True),
+    StructField("full_date", StringType(), True),
+    StructField("day_of_week", IntegerType(), True),
+    StructField("day_num_in_month", IntegerType(), True),
+    StructField("day_num_overall", IntegerType(), True),
+    StructField("day_name", StringType(), True),
+    StructField("day_abbrev", StringType(), True),
+    StructField("weekday_flag", StringType(), True),
+    StructField("week_num_in_year", IntegerType(), True),
+    StructField("week_num_overall", IntegerType(), True),
+    StructField("week_begin_date", StringType(), True),
+    StructField("week_begin_date_key", StringType(), True),
+    StructField("fb_month", IntegerType(), True),
+    StructField("month_num_overall", IntegerType(), True),
+    StructField("month_name", StringType(), True),
+    StructField("month_abbrev", StringType(), True),
+    StructField("quarter", IntegerType(), True),
+    StructField("fb_year", IntegerType(), True),
+    StructField("yearmo", IntegerType(), True),
+    StructField("fiscal_month", IntegerType(), True),
+    StructField("fiscal_quarter", IntegerType(), True),
+    StructField("fiscal_year", IntegerType(), True),
+    StructField("last_day_in_month_flag", StringType(), True),
+    StructField("same_day_year_ago_date", StringType(), True)
+])
+ 
+# -----------------------------------------------------------
+# 5. READ RAW CSV FILES
+# -----------------------------------------------------------
+ 
+company_df = spark.read.csv(raw_path + "Campus_Source1_Company.csv",
+                            schema=company_schema, header=True)
+ 
+college_df = spark.read.csv(raw_path + "Campus_Source2_College.csv",
+                            schema=college_schema, header=True)
+ 
+date_df = spark.read.csv(raw_path + "DIM.Date.Table.csv",
+                         schema=date_schema, header=True)
+ 
+# -----------------------------------------------------------
+# 6. BASIC CLEANING
+# -----------------------------------------------------------
+ 
+company_clean = (
+    company_df
+    .withColumn("College_Name", trim(upper(col("College_Name"))))
+    .withColumn("Company_Name", trim(upper(col("Company_Name"))))
+    .withColumn("Date", trim(col("Date")))
+)
+ 
+college_clean = (
+    college_df
+    .withColumn("College", trim(upper(col("College"))))
+    .withColumn("Date", trim(col("Date")))
+)
+ 
+date_clean = (
+    date_df
+    .withColumn("full_date", trim(col("full_date")))
+)
+ 
+# -----------------------------------------------------------
+# 7. WRITE DIM TABLES TO PROCESSED
+# -----------------------------------------------------------
+ 
+date_clean.write.mode("overwrite").parquet(processed + "dim_date/")
+college_clean.write.mode("overwrite").parquet(processed + "dim_college/")
+company_clean.write.mode("overwrite").parquet(processed + "dim_company/")
+ 
+# -----------------------------------------------------------
+# 8. BUILD FACT TABLE
+# -----------------------------------------------------------
+ 
+fact_df = (
+    company_clean.alias("c")
+    .join(college_clean.alias("cl"), col("c.College_Name") == col("cl.College"), "left")
+    .join(date_clean.alias("d"), col("c.Date") == col("d.full_date"), "left")
+    .select(
+        col("c.Date").alias("full_date"),
+        col("d.date_key"),
+        col("c.College_Name"),
+        col("c.Company_Name"),
+        col("Package"),
+        col("Student_Selected"),
+        col("Student_Participated"),
+        col("Criteria"),
+        col("cl.RANK").alias("college_rank"),
+        col("d.month_name"),
+        col("d.quarter"),
+        col("d.yearmo")
+    )
+)
+ 
+# -----------------------------------------------------------
+# 9. WRITE FACT TABLE TO PROCESSED
+# -----------------------------------------------------------
+ 
+fact_df.write.mode("overwrite").parquet(processed + "fact_campus/")
+ 
+# -----------------------------------------------------------
+# 10. END
+# -----------------------------------------------------------
+spark.stop()
+ 
